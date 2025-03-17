@@ -1,0 +1,11 @@
+[Unit]
+Description=Podman auto-update timer
+
+[Timer]
+OnCalendar=*-*-* 00:30
+RandomizedDelaySec=5
+Persistent=true
+Unit=podman-auto-update.service
+
+[Install]
+WantedBy=timers.target

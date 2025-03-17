@@ -1,0 +1,47 @@
+server:
+  port: 9091
+  endpoints:
+    authz:
+      forward-auth:
+        implementation: 'ForwardAuth'
+log:
+  level: 'info'
+authentication_backend:
+  password_reset:
+    disable: true
+  ldap:
+    implementation: <your_ldap_implementation>
+    address: ${LDAP_HOST}
+    start_tls: false
+    base_dn: <your_ldap_dn>
+    user: ${LDAP_USER}
+    password: ${LDAP_PASS}
+    users_filter: (&(objectClass=user)({username_attribute}={input})(memberOf=<your_ldap_cn>))
+    groups_filter: (&(member={dn}))
+    attributes:
+      username: <your_ldap_field>
+      group_name: cn
+totp:
+  disable: true
+access_control:
+  default_policy: 'one_factor'
+session:
+  expiration: '12h'
+  inactivity: '8h'
+  remember_me: '1d'
+  cookies:
+    - domain: <your_cookie_domain>
+      authelia_url: <your_authelia_portal_url>
+      default_redirection_url: <your_dagster_webserver_url>
+  redis:
+    host: redis-authelia
+    port: 6379
+    password: ${REDIS_PASS}
+storage:
+  postgres:
+    address: 'postgres-authelia:5432'
+    database: postgres
+    username: authelia
+notifier:
+  filesystem:
+    filename: /config/notification.txt

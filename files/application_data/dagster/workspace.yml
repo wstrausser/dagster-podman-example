@@ -1,0 +1,9 @@
+load_from:
+  - grpc_server:
+      host: dagster-code-dev
+      port: 4000
+      location_name: "Dev Code"
+  - grpc_server:
+      host: dagster-code-prod
+      port: 4000
+      location_name: "Prod Code"

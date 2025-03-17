@@ -1,0 +1,386 @@
+- name: Dagster Deployment
+  hosts: all
+  remote_user: "{{ remote_user_name }}"
+  become_user: root
+  become: true
+  tasks:
+    - name: Install podman
+      package:
+        name: podman
+        state: present
+        update_cache: true
+    
+
+    - name: Run podman socket
+      systemd:
+        name: podman.socket
+        enabled: true
+        state: started
+    
+
+    - name: Log in to container registry
+      containers.podman.podman_login:
+        authfile: /root/.docker/config.json
+        registry: "{{ container_registry_address }}"
+        username: "{{ container_registry_user }}"
+        password: "{{ container_registry_pass }}"
+
+
+    - name: Create application data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - /data/application_data
+        - /data/application_data/authelia/config
+        - /data/application_data/caddy/caddy_config
+        - /data/application_data/caddy/caddy_data
+        - /data/application_data/caddy/site
+        - /data/application_data/dagster
+        - /data/application_data/postgres-authelia/data
+        - /data/application_data/postgres-dagster/data
+        - /data/application_data/redis-authelia/data
+    
+
+    - name: Create dagster IO manager directory
+      file:
+        path: /tmp/dagster/io_manager_storage
+        state: directory
+    
+
+    - name: Send configuration files
+      copy:
+        src: "./files/application_data/{{ item }}"
+        dest: "/data/application_data/{{ item }}"
+      with_items:
+        - authelia/config/configuration.yml
+        - caddy/Caddyfile
+        - dagster/dagster.yml
+        - dagster/workspace.yml
+        
+    
+    - name: Send podman auto update timer file
+      copy:
+        src: ./files/systemd/podman-auto-update.timer
+        dest: /usr/lib/systemd/system/podman-auto-update.timer
+    
+
+    - name: Create dagster network
+      containers.podman.podman_network:
+        name: dagster
+        state: present
+    
+
+    - name: Create authelia network
+      containers.podman.podman_network:
+        name: authelia
+        state: present
+    
+
+    - name: Create caddy_data volume
+      containers.podman.podman_volume:
+        name: caddy_data
+        state: present
+    
+
+    - name: Create caddy_config volume
+      containers.podman.podman_volume:
+        name: caddy_config
+        state: present
+
+
+    - name: Create quadlet for Postgres-Dagster
+      containers.podman.podman_container:
+        name: postgres-dagster
+        image: docker.io/postgres:16
+        state: quadlet
+        shm_size: 128m
+        env:
+          POSTGRES_USER: "{{ dagster_postgres_user }}"
+          POSTGRES_PASSWORD: "{{ dagster_postgres_pass }}"
+        network: dagster
+        volumes:
+          - /data/application_data/postgres-dagster/data:/var/lib/postgresql/data
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+
+
+    - name: Create quadlet for DEV code
+      containers.podman.podman_container:
+        name: dagster-code-dev
+        image: <your_development_code_image>
+        state: quadlet
+        env:
+          DAGSTER_POSTGRES_USER: "{{ dagster_postgres_user }}"
+          DAGSTER_POSTGRES_PASSWORD: "{{ dagster_postgres_pass }}"
+          DAGSTER_CURRENT_IMAGE: <your_development_code_image>
+        network: dagster
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=postgres-dagster.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+    
+
+    - name: Create quadlet for PROD code
+      containers.podman.podman_container:
+        name: dagster-code-prod
+        image: <your_production_code_image>
+        state: quadlet
+        env:
+          DAGSTER_POSTGRES_USER: "{{ dagster_postgres_user }}"
+          DAGSTER_POSTGRES_PASSWORD: "{{ dagster_postgres_pass }}"
+          DAGSTER_CURRENT_IMAGE: <your_production_code_image>
+        network: dagster
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=postgres-dagster.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+
+
+    - name: Create quadlet for Dagster daemon
+      containers.podman.podman_container:
+        name: dagster-daemon
+        image: <your_dagster_image>
+        command: dagster-daemon run
+        state: quadlet
+        env:
+          DAGSTER_POSTGRES_USER: "{{ dagster_postgres_user }}"
+          DAGSTER_POSTGRES_PASSWORD: "{{ dagster_postgres_pass }}"
+        network: dagster
+        volumes:
+          - /data/application_data/dagster/dagster.yml:/opt/dagster/dagster_home/dagster.yaml:z
+          - /data/application_data/dagster/workspace.yml:/opt/dagster/dagster_home/workspace.yaml:z
+          - /run/podman/podman.sock:/var/run/docker.sock:z
+          - /tmp/dagster/io_manager_storage:/tmp/io_manager_storage:z
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=postgres-dagster.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+            ExecStartPre=mkdir -p /tmp/dagster/io_manager_storage
+
+
+    - name: Create quadlet for Dagster webserver
+      containers.podman.podman_container:
+        name: dagster-webserver
+        image: <your_dagster_image>
+        state: quadlet
+        command: dagster-webserver -h 0.0.0.0 -p 8080 -w workspace.yaml
+        env:
+          DAGSTER_POSTGRES_USER: "{{ dagster_postgres_user }}"
+          DAGSTER_POSTGRES_PASSWORD: "{{ dagster_postgres_pass }}"
+        network: dagster
+        volumes:
+          - /data/application_data/dagster/dagster.yml:/opt/dagster/dagster_home/dagster.yaml:z
+          - /data/application_data/dagster/workspace.yml:/opt/dagster/dagster_home/workspace.yaml:z
+          - /run/podman/podman.sock:/var/run/docker.sock:z
+          - /tmp/dagster/io_manager_storage:/tmp/io_manager_storage:z
+        ports:
+          - "127.0.0.1:8080:8080"
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=dagster-daemon.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+            ExecStartPre=mkdir -p /tmp/dagster/io_manager_storage
+    
+
+    - name: Create quadlet for Postgres-Authelia
+      containers.podman.podman_container:
+        name: postgres-authelia
+        image: docker.io/postgres:16
+        state: quadlet
+        shm_size: 128m
+        env:
+          POSTGRES_USER: "{{ authelia_postgres_user }}"
+          POSTGRES_PASSWORD: "{{ authelia_postgres_pass }}"
+        network: authelia
+        volumes:
+          - /data/application_data/postgres-authelia/data:/var/lib/postgresql/data
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+    
+
+    - name: Create quadlet for Redis-Authelia
+      containers.podman.podman_container:
+        name: redis-authelia
+        image: docker.io/redis:7
+        state: quadlet
+        env:
+          REDIS_ARGS: "--save 60 1 --requirepass {{ authelia_redis_pass }}"
+        network: authelia
+        volumes:
+          - /data/application_data/redis-authelia/data:/data
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+
+
+    - name: Create quadlet for Authelia
+      containers.podman.podman_container:
+        name: authelia
+        image: docker.io/authelia/authelia:4
+        state: quadlet
+        network: authelia
+        env:
+          POSTGRES_USER: "{{ authelia_postgres_user }}"
+          AUTHELIA_STORAGE_POSTGRES_PASSWORD: "{{ authelia_postgres_pass }}"
+          AUTHELIA_STORAGE_ENCRYPTION_KEY: "{{ authelia_storage_encryption_key }}"
+          AUTHELIA_SESSION_SECRET: "{{ authelia_session_secret }}"
+          LDAP_HOST: "{{ ldap_host }}"
+          LDAP_USER: "{{ ldap_user }}"
+          LDAP_PASS: "{{ ldap_pass }}"
+          REDIS_PASS: "{{ authelia_redis_pass }}"
+          X_AUTHELIA_CONFIG_FILTERS: expand-env
+        volumes:
+          - /data/application_data/authelia/config:/config
+        ports:
+          - "127.0.0.1:9091:9091"
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=postgres-authelia.service
+            Wants=redis-authelia.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+
+
+    - name: Create quadlet for Caddy
+      containers.podman.podman_container:
+        name: caddy
+        image: docker.io/caddy:2
+        state: quadlet
+        privileged: true
+        network: host
+        volumes:
+          - /data/application_data/caddy/Caddyfile:/etc/caddy/Caddyfile
+          - /data/application_data/caddy/site:/srv
+          - /data/application_data/caddy/caddy_data:/data
+          - /data/application_data/caddy/caddy_config:/config
+        quadlet_options:
+          - "AutoUpdate=registry"
+          - "Pull=newer"
+          - |
+            [Install]
+            WantedBy=multi-user.target
+            
+            [Unit]
+            StartLimitInterval=200
+            StartLimitBurst=5
+            Wants=authelia.service
+
+            [Service]
+            Restart=on-failure
+            RestartSec=30
+      
+
+    - name: Run services
+      systemd:
+        daemon_reload: true
+        name: "{{ item }}.service"
+        state: restarted
+        enabled: true
+      with_items:
+        - postgres-dagster
+        - dagster-code-dev
+        - dagster-code-prod
+        - dagster-daemon
+        - dagster-webserver
+        - postgres-authelia
+        - redis-authelia
+        - authelia
+        - caddy
+
+    
+    - name: Run podman auto update timer
+      systemd:
+        daemon_reload: false
+        name: "podman-auto-update.timer"
+        state: restarted
+        enabled: true
